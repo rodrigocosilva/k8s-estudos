@@ -1,0 +1,175 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: demo-app-code
+  namespace: monitoring-lab
+data:
+  app.py: |
+    import os
+    import random
+    import time
+    from flask import Flask, jsonify
+
+    from opentelemetry import trace, metrics
+    from opentelemetry.sdk.resources import Resource
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+    from opentelemetry.sdk.metrics import MeterProvider
+    from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+    from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
+    from opentelemetry.instrumentation.flask import FlaskInstrumentor
+
+    app = Flask(__name__)
+
+    resource = Resource.create({
+        "service.name": "demo-frontend",
+        "service.version": "1.0.0",
+        "deployment.environment": "lab"
+    })
+
+    trace_provider = TracerProvider(resource=resource)
+    trace.set_tracer_provider(trace_provider)
+
+    otlp_trace_exporter = OTLPSpanExporter(
+        endpoint=os.getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"),
+    )
+    trace_provider.add_span_processor(BatchSpanProcessor(otlp_trace_exporter))
+    tracer = trace.get_tracer(__name__)
+
+    metric_reader = PeriodicExportingMetricReader(
+        OTLPMetricExporter(
+            endpoint=os.getenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"),
+        ),
+        export_interval_millis=5000,
+    )
+    meter_provider = MeterProvider(resource=resource, metric_readers=[metric_reader])
+    metrics.set_meter_provider(meter_provider)
+    meter = metrics.get_meter("demo-frontend-meter")
+
+    request_counter = meter.create_counter(
+        "demo_requests_total",
+        description="Total de requests da demo app"
+    )
+
+    work_histogram = meter.create_histogram(
+        "demo_work_duration_ms",
+        description="Tempo de processamento da rota /work"
+    )
+
+    FlaskInstrumentor().instrument_app(app)
+
+    @app.route("/")
+    def home():
+        request_counter.add(1, {"route": "/", "status": "200"})
+        return """
+        <html>
+          <body style="font-family: Arial; margin: 40px;">
+            <h1>Demo Frontend OK</h1>
+            <p>Use <b>/work</b> para gerar traces e métricas.</p>
+            <p>Use <b>/health</b> para healthcheck.</p>
+          </body>
+        </html>
+        """
+
+    @app.route("/health")
+    def health():
+        request_counter.add(1, {"route": "/health", "status": "200"})
+        return jsonify({"status": "ok"})
+
+    @app.route("/work")
+    def work():
+        start = time.time()
+
+        with tracer.start_as_current_span("simulate-work") as span:
+            delay = random.uniform(0.1, 1.2)
+            span.set_attribute("app.delay_seconds", delay)
+            time.sleep(delay)
+
+            if random.random() < 0.2:
+                span.set_attribute("app.result", "slow-path")
+                time.sleep(random.uniform(0.5, 1.5))
+            else:
+                span.set_attribute("app.result", "fast-path")
+
+        duration_ms = (time.time() - start) * 1000
+        request_counter.add(1, {"route": "/work", "status": "200"})
+        work_histogram.record(duration_ms, {"route": "/work"})
+
+        return jsonify({
+            "message": "work done",
+            "duration_ms": round(duration_ms, 2)
+        })
+
+    if __name__ == "__main__":
+        app.run(host="0.0.0.0", port=8080)
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-frontend
+  namespace: monitoring-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: demo-frontend
+  template:
+    metadata:
+      labels:
+        app: demo-frontend
+    spec:
+      containers:
+        - name: demo-frontend
+          image: python:3.11-slim
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              pip install --no-cache-dir \
+                flask \
+                opentelemetry-api \
+                opentelemetry-sdk \
+                opentelemetry-exporter-otlp \
+                opentelemetry-instrumentation-flask && \
+              python /app/app.py
+          env:
+            - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+              value: http://otel-collector:4318/v1/traces
+            - name: OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
+              value: http://otel-collector:4318/v1/metrics
+          ports:
+            - containerPort: 8080
+          volumeMounts:
+            - name: app-code
+              mountPath: /app
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 8
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 15
+      volumes:
+        - name: app-code
+          configMap:
+            name: demo-app-code
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo-frontend
+  namespace: monitoring-lab
+spec:
+  type: NodePort
+  selector:
+    app: demo-frontend
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      nodePort: 30080

@@ -1,0 +1,499 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring-lab
+
+---
+# =========================
+# POSTGRES
+# =========================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres-db
+  namespace: monitoring-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres-db
+  template:
+    metadata:
+      labels:
+        app: postgres-db
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16.4-alpine
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: zabbix
+            - name: POSTGRES_USER
+              value: zabbix
+            - name: POSTGRES_PASSWORD
+              value: zabbix
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: postgres-storage
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            tcpSocket:
+              port: 5432
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 5432
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+      volumes:
+        - name: postgres-storage
+          emptyDir: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-db
+  namespace: monitoring-lab
+spec:
+  type: ClusterIP
+  selector:
+    app: postgres-db
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+
+---
+# =========================
+# ZABBIX SERVER
+# =========================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zabbix-server
+  namespace: monitoring-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: zabbix-server
+  template:
+    metadata:
+      labels:
+        app: zabbix-server
+    spec:
+      containers:
+        - name: zabbix-server
+          image: zabbix/zabbix-server-pgsql:7.0.13-alpine
+          ports:
+            - containerPort: 10051
+          env:
+            - name: DB_SERVER_HOST
+              value: postgres-db
+            - name: POSTGRES_DB
+              value: zabbix
+            - name: POSTGRES_USER
+              value: zabbix
+            - name: POSTGRES_PASSWORD
+              value: zabbix
+          readinessProbe:
+            tcpSocket:
+              port: 10051
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 10051
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: zabbix-server
+  namespace: monitoring-lab
+spec:
+  type: ClusterIP
+  selector:
+    app: zabbix-server
+  ports:
+    - name: trapper
+      port: 10051
+      targetPort: 10051
+
+---
+# =========================
+# ZABBIX WEB
+# =========================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zabbix-web
+  namespace: monitoring-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: zabbix-web
+  template:
+    metadata:
+      labels:
+        app: zabbix-web
+    spec:
+      containers:
+        - name: zabbix-web
+          image: zabbix/zabbix-web-nginx-pgsql:7.0.13-alpine
+          ports:
+            - containerPort: 8080
+          env:
+            - name: ZBX_SERVER_HOST
+              value: zabbix-server
+            - name: DB_SERVER_HOST
+              value: postgres-db
+            - name: POSTGRES_DB
+              value: zabbix
+            - name: POSTGRES_USER
+              value: zabbix
+            - name: POSTGRES_PASSWORD
+              value: zabbix
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: zabbix-web
+  namespace: monitoring-lab
+spec:
+  type: ClusterIP
+  selector:
+    app: zabbix-web
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: expose-zabbix-web
+  namespace: monitoring-lab
+spec:
+  type: LoadBalancer
+  selector:
+    app: zabbix-web
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+
+---
+# =========================
+# PROMETHEUS CONFIG
+# =========================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: monitoring-lab
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+
+    scrape_configs:
+      - job_name: prometheus
+        static_configs:
+          - targets: ["localhost:9090"]
+
+      - job_name: otel-collector
+        static_configs:
+          - targets: ["otel-collector.monitoring-lab.svc.cluster.local:8889"]
+
+---
+# =========================
+# PROMETHEUS
+# =========================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: monitoring-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+    spec:
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v2.54.1
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/prometheus
+            - --web.enable-lifecycle
+          ports:
+            - containerPort: 9090
+          volumeMounts:
+            - name: prometheus-config-volume
+              mountPath: /etc/prometheus/prometheus.yml
+              subPath: prometheus.yml
+            - name: prometheus-storage
+              mountPath: /prometheus
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: 9090
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: 9090
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+      volumes:
+        - name: prometheus-config-volume
+          configMap:
+            name: prometheus-config
+        - name: prometheus-storage
+          emptyDir: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: monitoring-lab
+spec:
+  type: ClusterIP
+  selector:
+    app: prometheus
+  ports:
+    - name: http
+      port: 9090
+      targetPort: 9090
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: expose-prometheus
+  namespace: monitoring-lab
+spec:
+  type: LoadBalancer
+  selector:
+    app: prometheus
+  ports:
+    - name: http
+      port: 9090
+      targetPort: 9090
+
+---
+# =========================
+# GRAFANA
+# =========================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: monitoring-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      containers:
+        - name: grafana
+          image: grafana/grafana:11.1.4
+          ports:
+            - containerPort: 3000
+          volumeMounts:
+            - name: grafana-storage
+              mountPath: /var/lib/grafana
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 25
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+      volumes:
+        - name: grafana-storage
+          emptyDir: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: monitoring-lab
+spec:
+  type: ClusterIP
+  selector:
+    app: grafana
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: expose-grafana
+  namespace: monitoring-lab
+spec:
+  type: LoadBalancer
+  selector:
+    app: grafana
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+
+---
+# =========================
+# JAEGER
+# =========================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jaeger
+  namespace: monitoring-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: jaeger
+  template:
+    metadata:
+      labels:
+        app: jaeger
+    spec:
+      containers:
+        - name: jaeger
+          image: jaegertracing/all-in-one:1.58
+          ports:
+            - containerPort: 16686
+            - containerPort: 4317
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 16686
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 16686
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jaeger
+  namespace: monitoring-lab
+spec:
+  type: ClusterIP
+  selector:
+    app: jaeger
+  ports:
+    - name: ui
+      port: 16686
+      targetPort: 16686
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: expose-jaeger
+  namespace: monitoring-lab
+spec:
+  type: LoadBalancer
+  selector:
+    app: jaeger
+  ports:
+    - name: ui
+      port: 16686
+      targetPort: 16686
