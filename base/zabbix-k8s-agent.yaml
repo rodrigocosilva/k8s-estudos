@@ -1,0 +1,197 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: zabbix-k8s-agent
+  namespace: monitoring-lab
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: zabbix-k8s-agent-role
+  namespace: monitoring-lab
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: zabbix-k8s-agent-rolebinding
+  namespace: monitoring-lab
+subjects:
+  - kind: ServiceAccount
+    name: zabbix-k8s-agent
+    namespace: monitoring-lab
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: zabbix-k8s-agent-role
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: zabbix-k8s-scripts
+  namespace: monitoring-lab
+data:
+  pods_summary.sh: |
+    #!/bin/sh
+    /opt/bin/kubectl get pods -n monitoring-lab --sort-by=.metadata.name 2>/dev/null
+
+  pods_discovery.sh: |
+    #!/bin/sh
+    PODS=$(/opt/bin/kubectl get pods -n monitoring-lab -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null)
+
+    printf '{"data":['
+    FIRST=1
+    echo "$PODS" | while read -r POD; do
+      [ -z "$POD" ] && continue
+      if [ $FIRST -eq 0 ]; then
+        printf ','
+      fi
+      printf '{"{#PODNAME}":"%s"}' "$POD"
+      FIRST=0
+    done
+    printf ']}'
+
+  pod_field.sh: |
+    #!/bin/sh
+    POD="$1"
+    FIELD="$2"
+
+    LINE=$(/opt/bin/kubectl get pod "$POD" -n monitoring-lab --no-headers 2>/dev/null | head -n 1)
+
+    [ -z "$LINE" ] && exit 1
+
+    case "$FIELD" in
+      ready)
+        echo "$LINE" | awk '{print $2}'
+        ;;
+      status)
+        echo "$LINE" | awk '{print $3}'
+        ;;
+      restarts)
+        echo "$LINE" | awk '{print $4}'
+        ;;
+      age)
+        echo "$LINE" | awk '{print $5}'
+        ;;
+      name)
+        echo "$LINE" | awk '{print $1}'
+        ;;
+      *)
+        exit 1
+        ;;
+    esac
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: zabbix-agent2-config
+  namespace: monitoring-lab
+data:
+  zabbix_agent2.conf: |
+    PidFile=/tmp/zabbix_agent2.pid
+    LogType=console
+    Server=zabbix-server
+    ServerActive=zabbix-server
+    Hostname=k8s-monitoring-lab-agent
+    Include=/etc/zabbix/zabbix_agent2.d/*.conf
+
+  k8s.conf: |
+    UserParameter=k8s.pods.summary,/scripts/pods_summary.sh
+    UserParameter=k8s.pods.discovery,/scripts/pods_discovery.sh
+    UserParameter=k8s.pod.field[*],/scripts/pod_field.sh "$1" "$2"
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zabbix-k8s-agent
+  namespace: monitoring-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: zabbix-k8s-agent
+  template:
+    metadata:
+      labels:
+        app: zabbix-k8s-agent
+    spec:
+      serviceAccountName: zabbix-k8s-agent
+      initContainers:
+        - name: kubectl
+          image: bitnami/kubectl:latest
+          command:
+            - /bin/sh
+            - -c
+            - |
+              cp /opt/bitnami/kubectl/bin/kubectl /shared/kubectl
+              chmod +x /shared/kubectl
+          volumeMounts:
+            - name: kubectl-bin
+              mountPath: /shared
+      containers:
+        - name: zabbix-agent2
+          image: zabbix/zabbix-agent2:alpine-7.0-latest
+          ports:
+            - containerPort: 10050
+          volumeMounts:
+            - name: kubectl-bin
+              mountPath: /opt/bin
+            - name: scripts
+              mountPath: /scripts
+            - name: agent-config
+              mountPath: /etc/zabbix/zabbix_agent2.conf
+              subPath: zabbix_agent2.conf
+            - name: agent-extra-config
+              mountPath: /etc/zabbix/zabbix_agent2.d/k8s.conf
+              subPath: k8s.conf
+          readinessProbe:
+            tcpSocket:
+              port: 10050
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 10050
+            initialDelaySeconds: 20
+            periodSeconds: 20
+      volumes:
+        - name: kubectl-bin
+          emptyDir: {}
+        - name: scripts
+          configMap:
+            name: zabbix-k8s-scripts
+            defaultMode: 0755
+        - name: agent-config
+          configMap:
+            name: zabbix-agent2-config
+            items:
+              - key: zabbix_agent2.conf
+                path: zabbix_agent2.conf
+        - name: agent-extra-config
+          configMap:
+            name: zabbix-agent2-config
+            items:
+              - key: k8s.conf
+                path: k8s.conf
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: zabbix-k8s-agent
+  namespace: monitoring-lab
+spec:
+  selector:
+    app: zabbix-k8s-agent
+  ports:
+    - name: agent
+      port: 10050
+      targetPort: 10050
