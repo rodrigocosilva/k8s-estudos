@@ -97,7 +97,7 @@ data:
   zabbix_agent2.conf: |
     PidFile=/tmp/zabbix_agent2.pid
     LogType=console
-    Server=zabbix-server
+    Server=0.0.0.0/0
     ServerActive=zabbix-server
     Hostname=k8s-monitoring-lab-agent
     Include=/etc/zabbix/zabbix_agent2.d/*.conf
@@ -138,7 +138,7 @@ spec:
               mountPath: /shared
       containers:
         - name: zabbix-agent2
-          image: zabbix/zabbix-agent2:alpine-7.0-latest
+          image: zabbix/zabbix-agent2:alpine-trunk
           ports:
             - containerPort: 10050
           volumeMounts:

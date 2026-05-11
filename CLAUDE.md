@@ -19,9 +19,9 @@ Componentes implantados no Kubernetes (namespace `monitoring-lab`):
 | OpenTelemetry Collector | 0.100.0 | Ingestão e roteamento de telemetria |
 | PostgreSQL | 16.4-alpine | Backend do Zabbix |
 | Prometheus | v2.54.1 | Coleta e consulta de métricas |
-| Zabbix Server | 7.0.13 | Monitoramento tradicional |
-| Zabbix Web | 7.0.13 | Interface web do Zabbix |
-| Zabbix Agent 2 | alpine-7.0 | Agente de monitoramento K8s-nativo |
+| Zabbix Server | 8.x (alpine-trunk) | Monitoramento tradicional |
+| Zabbix Web | 8.x (alpine-trunk) | Interface web do Zabbix |
+| Zabbix Agent 2 | alpine-trunk | Agente de monitoramento K8s-nativo |
 | Demo App (Flask) | Python 3.11 | App de exemplo com OpenTelemetry |
 
 ---

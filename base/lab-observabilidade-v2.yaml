@@ -96,7 +96,7 @@ spec:
     spec:
       containers:
         - name: zabbix-server
-          image: zabbix/zabbix-server-pgsql:7.0.13-alpine
+          image: zabbix/zabbix-server-pgsql:alpine-trunk
           ports:
             - containerPort: 10051
           env:
@@ -162,7 +162,7 @@ spec:
     spec:
       containers:
         - name: zabbix-web
-          image: zabbix/zabbix-web-nginx-pgsql:7.0.13-alpine
+          image: zabbix/zabbix-web-nginx-pgsql:alpine-trunk
           ports:
             - containerPort: 8080
           env:
